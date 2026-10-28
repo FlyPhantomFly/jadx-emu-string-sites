@@ -1,0 +1,11 @@
+jadx-emu-string-sites
+=====================
+
+An extension for jadx-emu (https://github.com/nitanmarcel/jadx-emu). It links the
+jadx-emu engine (io.github.flyphantomfly:jadx-emu), licensed under the GNU General
+Public License, version 2; this extension is therefore also distributed under GPLv2
+(see LICENSE).
+
+Copyright (C) 2026 FlyPhantomFly.
+
+Free software under GPLv2, WITHOUT ANY WARRANTY. See LICENSE for the full text.
