@@ -16,7 +16,7 @@ import java.nio.file.Files
 import java.nio.file.Path
 import java.util.Properties
 
-const val STRING_SITES_VERSION = "0.2.0"
+const val STRING_SITES_VERSION = "0.3.0"
 
 /**
  * Finds decrypted strings in the loaded app and reports every site it could not decode, with the reason.

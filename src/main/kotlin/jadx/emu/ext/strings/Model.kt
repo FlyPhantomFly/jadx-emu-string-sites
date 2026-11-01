@@ -56,9 +56,15 @@ sealed interface Outcome
 
 /** How much the result looks like a decrypted secret rather than an ordinary constant. */
 enum class Confidence {
-    /** The producing helper does byte/char arithmetic over its input (xor/add/sub/array ops): real decoding. */
+    /** Recovered via an **obfuscated-named** helper (short, `$$`-prefixed, or an obfuscated owner) and non-trivial.
+     *  This is a statement about *how* the string was recovered (a renamed decryptor), not a claim that it is a secret -
+     *  on a DexGuard app most strings, secret or not, are stored this way. */
     DECRYPTED,
-    /** A constant computed by an ordinary, non-obfuscated helper (prefix, concat, hex-decode of a literal): folding, not decryption. */
+    /** Recovered the same way, but the value is trivial - a single char, or all control/null/whitespace. Counted
+     *  separately; values go to JSON only so the text report is not flooded with one-char tokens. */
+    TRIVIAL,
+    /** A constant from a **library/normally-named** helper (`Hex.decode`, `getUtf8Bytes`, a `"WM-"+tag` prefixer) or a
+     *  dataflow-resolved literal - folding, not an obfuscated decryptor. */
     FOLDED,
 }
 

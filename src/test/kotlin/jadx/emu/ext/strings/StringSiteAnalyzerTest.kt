@@ -106,8 +106,11 @@ class StringSiteAnalyzerTest {
 
     @Test fun reportTextSeparatesDecryptedFromFolded() {
         val t = report.toText()
-        assertTrue(Regex("decoded \\(\\d+ decrypted, \\d+ folded constants\\)").containsMatchIn(t), t.lines().first())
-        assertTrue(t.contains("decrypted strings:"))
+        assertTrue(Regex("\\d+ decrypted, \\d+ trivial, \\d+ folded").containsMatchIn(t), t.lineSequence().first())
+        assertTrue(t.contains("decrypted strings (grouped by decryptor):"))
+        // trivial values must NOT appear inline in the text report (JSON only)
+        val trivialValue = report.trivial.map { (it.outcome as Decoded).value }.firstOrNull()
+        if (trivialValue != null && trivialValue.length == 1) assertFalse(t.contains("  via ") && t.substringAfter("grouped by decryptor").contains("\"$trivialValue\""))
     }
 
     // ---- tier 1: dataflow only ---------------------------------------------------------------------------------------------------------
@@ -155,6 +158,56 @@ class StringSiteAnalyzerTest {
             assertEquals(Reason.HOST_DENIED, skipped(r).reason, skipped(r).detail)
             assertTrue(skipped(r).detail.contains("Executors"), skipped(r).detail)
         }
+    }
+
+    @Test fun aShortNamedHelperCallingOnlyFrameworkFolds() {
+        // androidx/work/x->i: short name (synthetic by name) but only calls framework StringBuilder - the WM- prefixer.
+        // Must FOLD. This is the WorkManager false positive; without the framework-call exclusion it would wrongly decrypt.
+        val iw = report.helpers.single { it.signature.endsWith(";->iw(Ljava/lang/String;)Ljava/lang/String;") }
+        assertFalse(iw.doesArithmetic, "iw does no arithmetic")
+        val r = results("wmA()Ljava/lang/String;", SiteKind.HELPER_CALL).single()
+        assertEquals("WM-Worker", decoded(r).value)
+        assertEquals(Confidence.FOLDED, decoded(r).confidence, "calls only framework -> folded, not a decoder")
+    }
+
+    @Test fun aDecryptorThatDelegatesToASyntheticCodecDecryptsEvenWithoutOwnArithmetic() {
+        // The real idrnd i.a / microblink b.j shape: q does NO arithmetic in its own body, but it CALLS a synthetic app
+        // codec (z0K). It must be DECRYPTED - deterministically, whether or not z0K's body resolves - because calling an
+        // obfuscated app helper is the decoder signal. (A library helper like androidx work x.i calls only framework
+        // StringBuilder, so it does NOT get this and folds - the WM- fix.)
+        val r = results("lookupA()Ljava/lang/String;", SiteKind.HELPER_CALL).single()
+        assertEquals(Confidence.DECRYPTED, decoded(r).confidence, "delegates to a synthetic codec -> decrypted")
+    }
+
+    @Test fun aDelegatingDecryptorIsDecryptedViaOneLevel() {
+        // ix does no arithmetic itself; it calls inner z0K which XORs. One-level delegation must classify ix as a decryptor.
+        val ix = report.helpers.single { it.signature.endsWith(";->ix(Ljava/lang/String;)Ljava/lang/String;") }
+        assertTrue(ix.decryptor, "ix is a usage-flagged decryptor")
+        val rs = results("delegA()Ljava/lang/String;", SiteKind.HELPER_CALL).filter { (it.outcome as? Decoded)?.value == "deleg-one" }
+        assertTrue(rs.isNotEmpty(), "delegA should decode deleg-one")
+        assertEquals(Confidence.DECRYPTED, decoded(rs.first()).confidence)
+    }
+
+    @Test fun aLibraryNamedHelperThatDoesArithmeticStillFolds() {
+        // decodeConfigValue: camelCase wordlike name, real XOR body -> the name test demotes it; NOT a decryptor.
+        val h = report.helpers.single { it.signature.endsWith("decodeConfigValue(Ljava/lang/String;I)Ljava/lang/String;") }
+        assertTrue(h.doesArithmetic, "it genuinely does xor arithmetic")
+        val r = results("libArithA()Ljava/lang/String;", SiteKind.HELPER_CALL).single()
+        assertEquals("alpha-setting", decoded(r).value)
+        assertEquals(Confidence.FOLDED, decoded(r).confidence)
+    }
+
+    @Test fun aDecryptorReturningASingleCharIsTrivialNotDecrypted() {
+        // Lfx/Dec;->dec is a real decryptor, but a one-char output is a token, not a secret -> TRIVIAL.
+        for (name in listOf("trivialA", "trivialB", "trivialC")) {
+            val r = results("$name()Ljava/lang/String;", SiteKind.HELPER_CALL).single()
+            assertEquals(Confidence.TRIVIAL, decoded(r).confidence, "${decoded(r).value} should be trivial")
+        }
+    }
+
+    @Test fun realDecryptorWithRealStringIsStillDecrypted() {
+        // the multi-char secret must survive the trivial gate
+        assertEquals(Confidence.DECRYPTED, decoded(results("viaHelperIntern()Ljava/lang/String;", SiteKind.HELPER_CALL).single()).confidence)
     }
 
     @Test fun aCharToByteCopyHelperIsFoldedNotDecrypted() {
@@ -228,6 +281,15 @@ class StringSiteAnalyzerTest {
         assertEquals(s.skipped, s.skipReasons.values.sum())
         assertEquals(s.found, s.byKind.values.sumOf { it.first + it.second })
         assertTrue(report.toText().contains("skipped sites:"))
+    }
+
+    @Test fun jsonSummaryHasAllThreeTiersAndTheySum() {
+        val summary = (MiniJson.parse(report.toJson()) as Map<*, *>)["summary"] as Map<*, *>
+        val d = (summary["decrypted"] as Double).toInt()
+        val t = (summary["trivial"] as Double).toInt()
+        val f = (summary["folded"] as Double).toInt()
+        assertEquals((summary["decoded"] as Double).toInt(), d + t + f, "decrypted+trivial+folded must equal decoded")
+        assertEquals(report.decrypted.size, d); assertEquals(report.trivial.size, t); assertEquals(report.folded.size, f)
     }
 
     @Test fun jsonIsValidAndRoundTripsEveryValue() {

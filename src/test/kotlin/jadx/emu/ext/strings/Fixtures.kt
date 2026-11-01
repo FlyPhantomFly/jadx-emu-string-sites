@@ -104,6 +104,80 @@ object Fixtures {
 .method public static native nativeDec(I)Ljava/lang/String;
 .end method
 
+# a synthetic-named helper with NO arithmetic and NO visible delegation (models idrnd i.a on the full app, where the
+# codec isn't resolvable): returns a real multi-char string. Must still be DECRYPTED under name-only classification.
+.method public static q(I)Ljava/lang/String;
+    .registers 2
+    const-string v0, "VKD5Mw=="
+    invoke-static {v0}, Lfx/Dec;->z0K(Ljava/lang/String;)Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+# DexGuard delegation shape: outer decryptor 'ix' does NO arithmetic itself - it calls inner 'z0K' which XORs.
+# 'ix' must still classify as a decryptor via one-level delegation.
+.method public static z0K(Ljava/lang/String;)Ljava/lang/String;
+    .registers 5
+    invoke-virtual {p0}, Ljava/lang/String;->toCharArray()[C
+    move-result-object v0
+    const/4 v1, 0
+    :loop
+    array-length v2, v0
+    if-ge v1, v2, :done
+    aget-char v2, v0, v1
+    xor-int/lit8 v2, v2, 3
+    int-to-char v2, v2
+    aput-char v2, v0, v1
+    add-int/lit8 v1, v1, 1
+    goto :loop
+    :done
+    new-instance v1, Ljava/lang/String;
+    invoke-direct {v1, v0}, Ljava/lang/String;-><init>([C)V
+    return-object v1
+.end method
+
+.method public static ix(Ljava/lang/String;)Ljava/lang/String;
+    .registers 2
+    invoke-static {p0}, Lfx/Dec;->z0K(Ljava/lang/String;)Ljava/lang/String;
+    move-result-object p0
+    return-object p0
+.end method
+
+# androidx/work/x->i shape: SHORT name (synthetic by name) but body only calls framework StringBuilder.append ("WM-"+tag).
+# No arithmetic, no synthetic app-helper call -> must FOLD (the WorkManager false positive), not decrypt.
+.method public static iw(Ljava/lang/String;)Ljava/lang/String;
+    .registers 3
+    new-instance v0, Ljava/lang/StringBuilder;
+    invoke-direct {v0}, Ljava/lang/StringBuilder;-><init>()V
+    const-string v1, "WM-"
+    invoke-virtual {v0, v1}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0, p0}, Ljava/lang/StringBuilder;->append(Ljava/lang/String;)Ljava/lang/StringBuilder;
+    invoke-virtual {v0}, Ljava/lang/StringBuilder;->toString()Ljava/lang/String;
+    move-result-object v0
+    return-object v0
+.end method
+
+# a library-named helper that DOES transform arithmetic (xor) but has a wordlike camelCase name -> must FOLD, not decrypt.
+.method public static decodeConfigValue(Ljava/lang/String;I)Ljava/lang/String;
+    .registers 6
+    invoke-virtual {p0}, Ljava/lang/String;->toCharArray()[C
+    move-result-object v0
+    const/4 v1, 0
+    :loop
+    array-length v2, v0
+    if-ge v1, v2, :done
+    aget-char v2, v0, v1
+    xor-int/2addr v2, p1
+    int-to-char v2, v2
+    aput-char v2, v0, v1
+    add-int/lit8 v1, v1, 1
+    goto :loop
+    :done
+    new-instance v1, Ljava/lang/String;
+    invoke-direct {v1, v0}, Ljava/lang/String;-><init>([C)V
+    return-object v1
+.end method
+
 # org.bouncycastle.util.Strings.toByteArray shape: b[i]=(byte)s.charAt(i) with a +1 counter. NOT a decoder.
 .method public static toByteArray(Ljava/lang/String;)[B
     .registers 5
@@ -146,6 +220,18 @@ object Fixtures {
 
     private fun use(body: String) = ".class public Lfx/Use;\n.super Ljava/lang/Object;\n$body\n"
     private fun m(sig: String, regs: Int, body: String) = ".method public static $sig\n    .registers $regs\n$body\n.end method\n"
+
+    private fun ixCall(plain: String) = """
+    const-string v0, ${lit(xor(plain, 3))}
+    invoke-static {v0}, Lfx/Dec;->ix(Ljava/lang/String;)Ljava/lang/String;
+    move-result-object v0
+    return-object v0"""
+
+    private fun decConfigCall(plain: String) = """
+    const-string v0, ${lit(xor(plain, 3))}
+    const/16 v1, 3
+    invoke-static {v0, v1}, Lfx/Dec;->decodeConfigValue(Ljava/lang/String;I)Ljava/lang/String;
+    move-result-object v0"""
 
     private fun decCall(cipher: String, key: Int) = """
     const-string v0, ${lit(cipher)}
@@ -268,6 +354,21 @@ ${decCall(xor("right", 5), 5)}
     return-object v0""") +
         m("badA()Ljava/lang/String;", 2, badBody()) + m("badB()Ljava/lang/String;", 2, badBody()) + m("badC()Ljava/lang/String;", 2, badBody()) +
         m("spinA()Ljava/lang/String;", 2, spinBody()) + m("spinB()Ljava/lang/String;", 2, spinBody()) + m("spinC()Ljava/lang/String;", 2, spinBody()) +
+        m("wmA()Ljava/lang/String;", 2, "    const-string v0, \"Worker\"\n    invoke-static {v0}, Lfx/Dec;->iw(Ljava/lang/String;)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("wmB()Ljava/lang/String;", 2, "    const-string v0, \"Processor\"\n    invoke-static {v0}, Lfx/Dec;->iw(Ljava/lang/String;)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("wmC()Ljava/lang/String;", 2, "    const-string v0, \"Scheduler\"\n    invoke-static {v0}, Lfx/Dec;->iw(Ljava/lang/String;)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("lookupA()Ljava/lang/String;", 2, "    const/4 v0, 1\n    invoke-static {v0}, Lfx/Dec;->q(I)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("lookupB()Ljava/lang/String;", 2, "    const/4 v0, 2\n    invoke-static {v0}, Lfx/Dec;->q(I)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("lookupC()Ljava/lang/String;", 2, "    const/4 v0, 3\n    invoke-static {v0}, Lfx/Dec;->q(I)Ljava/lang/String;\n    move-result-object v0\n    return-object v0") +
+        m("delegA()Ljava/lang/String;", 3, ixCall("deleg-one")) +
+        m("delegB()Ljava/lang/String;", 3, ixCall("deleg-two")) +
+        m("delegC()Ljava/lang/String;", 3, ixCall("deleg-three")) +
+        m("libArithA()Ljava/lang/String;", 3, decConfigCall("alpha-setting") ) +
+        m("libArithB()Ljava/lang/String;", 3, decConfigCall("beta-setting") ) +
+        m("libArithC()Ljava/lang/String;", 3, decConfigCall("gamma-setting") ) +
+        m("trivialA()Ljava/lang/String;", 3, decCall(xor("x", 3), 3) + "\n    return-object v0") +
+        m("trivialB()Ljava/lang/String;", 3, decCall(xor("y", 3), 3) + "\n    return-object v0") +
+        m("trivialC()Ljava/lang/String;", 3, decCall(xor("z", 3), 3) + "\n    return-object v0") +
         m("tbA()Ljava/lang/String;", 5, "    const-string v0, \"alpha\"\n    invoke-static {v0}, Lfx/Dec;->toByteArray(Ljava/lang/String;)[B\n    move-result-object v1\n    new-instance v2, Ljava/lang/String;\n    const-string v3, \"UTF-8\"\n    invoke-direct {v2, v1, v3}, Ljava/lang/String;-><init>([BLjava/lang/String;)V\n    return-object v2") +
         m("tbB()Ljava/lang/String;", 5, "    const-string v0, \"beta\"\n    invoke-static {v0}, Lfx/Dec;->toByteArray(Ljava/lang/String;)[B\n    move-result-object v1\n    new-instance v2, Ljava/lang/String;\n    const-string v3, \"UTF-8\"\n    invoke-direct {v2, v1, v3}, Ljava/lang/String;-><init>([BLjava/lang/String;)V\n    return-object v2") +
         m("tbC()Ljava/lang/String;", 5, "    const-string v0, \"gamma\"\n    invoke-static {v0}, Lfx/Dec;->toByteArray(Ljava/lang/String;)[B\n    move-result-object v1\n    new-instance v2, Ljava/lang/String;\n    const-string v3, \"UTF-8\"\n    invoke-direct {v2, v1, v3}, Ljava/lang/String;-><init>([BLjava/lang/String;)V\n    return-object v2") +

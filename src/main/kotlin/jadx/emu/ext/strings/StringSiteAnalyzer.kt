@@ -69,7 +69,7 @@ class StringSiteAnalyzer(
         }
         val decryptors = usage.filterValues { it.constant >= settings.helperMinConstantSites }.keys
         val arithOf = HashMap<String, Boolean>()
-        for (k in decryptors) usage[k]?.ref?.let { r -> source.method(r.declClass, r.shortId)?.let { arithOf[k] = Sinks.doesDecodingArithmetic(it) } }
+        for (k in decryptors) usage[k]?.ref?.let { r -> source.method(r.declClass, r.shortId)?.let { arithOf[k] = looksLikeDecoder(it) } }
         val helpers = usage.map { (k, u) -> HelperInfo(sig(u.ref), u.sites, u.constant, k in decryptors, arithOf[k] ?: false) }
 
         // ---- phase C: tier 2 - run each decryptor helper with the constants of each call site -----------------------------------
@@ -88,7 +88,7 @@ class StringSiteAnalyzer(
                 else -> {
                     val run = runs.getOrPut(key(c.ref)) { newRun(c.ref) } ?: continue
                     when (val v = runHelper(run, c.args)) {
-                        is HelperValue.Ok -> { callValue[id] = v; callOutcome[id] = Decoded(v.text, 2, label, confidenceOf(c.ref, arithOf), v.note) }
+                        is HelperValue.Ok -> { callValue[id] = v; callOutcome[id] = Decoded(v.text, 2, label, confidenceOf(c.ref, arithOf, v.text), v.note) }
                         is HelperValue.Fail -> callOutcome[id] = Skipped(v.reason, v.detail)
                     }
                 }
@@ -207,13 +207,13 @@ class StringSiteAnalyzer(
             return Skipped(reason, "v${sink.argReg} ($what) is ${describe(v)}" + if (!complete) "; dataflow stopped early" else "")
         }
         return when (sink.kind) {
-            SiteKind.INTERN -> if (v is String) Decoded(v, 1) else unknown("string")
-            SiteKind.NEW_STRING_CHARS, SiteKind.VALUEOF_CHARS -> if (v is CharArray) Decoded(String(v), 1) else unknown("char[]")
+            SiteKind.INTERN -> if (v is String) Decoded(v, 1, confidence = Confidence.FOLDED) else unknown("string")
+            SiteKind.NEW_STRING_CHARS, SiteKind.VALUEOF_CHARS -> if (v is CharArray) Decoded(String(v), 1, confidence = Confidence.FOLDED) else unknown("char[]")
             SiteKind.NEW_STRING_BYTES -> {
                 if (v !is ByteArray) return unknown("byte[]")
                 val (cs, note) = charsetOf(sink, cv)
                 if (cs == null) Skipped(Reason.UNKNOWN_ARGUMENT, "charset register v${sink.charsetReg} is ${describe(cv)}")
-                else Decoded(String(v, cs), 1, note = note)
+                else Decoded(String(v, cs), 1, confidence = Confidence.FOLDED, note = note)
             }
             SiteKind.HELPER_CALL -> error("not a sink")
         }
@@ -273,9 +273,11 @@ class StringSiteAnalyzer(
     }
 
     /** A sink fed by a decoded helper call: apply the sink's own conversion to what the helper returned. */
+    private fun textOf(ok: HelperValue.Ok): String = ok.text
+
     private fun fromHelper(ss: SinkScan, fed: HelperValue.Ok, ref: MethodRef, callOffset: Int, arithOf: Map<String, Boolean>): Outcome? {
         val via = "${sig(ref)} @$callOffset"
-        val conf = confidenceOf(ref, arithOf)
+        val conf = confidenceOf(ref, arithOf, textOf(fed))
         val raw = fed.raw
         return when (ss.sink.kind) {
             SiteKind.INTERN -> if (raw is String) Decoded(raw, 2, via, conf) else null
@@ -293,18 +295,75 @@ class StringSiteAnalyzer(
      * decode arithmetic; FOLDED otherwise. So a named library helper that merely concatenates (WorkManager's tag
      * prefixer, a hex-decode of a literal certificate) reads as folded, not as a recovered secret.
      */
-    private fun confidenceOf(ref: MethodRef, arithOf: Map<String, Boolean>): Confidence =
-        if (arithOf[key(ref)] == true || isObfuscatedOwner(ref.declClass)) Confidence.DECRYPTED else Confidence.FOLDED
-
-    private fun isObfuscatedOwner(declClass: String): Boolean {
-        // Deliberately conservative: a single-character class name (La/b/c;) or two or more single-character package
-        // segments. Short but real names (fx, io, ui, zzj) are NOT treated as obfuscation - the arithmetic-body test
-        // is the reliable decryptor signal; this only catches the clearest name obfuscation on top of it.
-        val owner = declClass.trim('L', ';').split('/')
-        val cls = owner.lastOrNull() ?: return false
-        val singleCharSegments = owner.dropLast(1).count { it.length == 1 }
-        return (cls.length == 1) || singleCharSegments >= 2
+    /**
+     * A helper is a real string decryptor only if its NAME is synthetic/obfuscated (DexGuard renames decryptors to short
+     * or `$$`-prefixed names) AND its body does transform arithmetic. Both are required: a minified library method such as
+     * `androidx/work/x->i` has a short name but only concatenates (fails arithmetic -> folded); a normally-named library
+     * method such as `org/bouncycastle/.../Hex->decode` does byte work but keeps its real name (fails the name test ->
+     * folded). Confirmed on two real DexGuard apps (OnePay `a(SIB)` XOR, VFS `$$e(SIB)` XOR stay; the ~20 library helpers
+     * per app - bouncycastle/tink/media3/gms Preconditions - demote). A recovered value is only DECRYPTED if it is
+     * non-trivial; a single char or an all-control/null/whitespace value is TRIVIAL (recovered, but a token not a secret).
+     */
+    private fun confidenceOf(ref: MethodRef, arithOf: Map<String, Boolean>, value: String): Confidence {
+        // DECRYPTED means "recovered via an obfuscated-named helper" - not a secrecy judgement. A library/normally-named
+        // helper (Hex.decode, getUtf8Bytes, checkNotEmpty, WorkManager's "WM-" prefixer) is FOLDED. This is decided by the
+        // helper NAME alone, deterministically, so it does not depend on resolving an inner codec across dex files.
+        // (arithOf is still reported on each helper for information, but no longer gates the confidence.)
+        val isDecoder = syntheticName(ref) && arithOf[key(ref)] == true
+        if (!isDecoder) return Confidence.FOLDED
+        return if (isTrivialValue(value)) Confidence.TRIVIAL else Confidence.DECRYPTED
     }
+
+    /**
+     * The name is NOT a real library identifier - i.e. it looks machine-generated. A `$$`-prefixed or short (<=3 char)
+     * method name is synthetic; a longer name is treated as a real library method only if it reads like words - a
+     * camelCase hump (`getUtf8Bytes`, `checkNotEmpty`, `createKey`, `intToStringMaxRadix`) or an all-lowercase word of
+     * 5+ chars (`decode`, `getname`). Everything else is synthetic. The arithmetic gate (AND, in confidenceOf) is the
+     * real decider; this only strips names that are obviously library methods, which is enough to demote the ~20
+     * library false-positives per real app while keeping `dec`, `a`, `$$e`, `K` and the like.
+     */
+    /**
+     * Does this method look like a real decoder (not a library constant helper)? A method qualifies if it either does
+     * transform arithmetic itself, OR it invokes another **synthetic-named, non-framework** helper - its codec. The
+     * second arm is the key: DexGuard's per-class decryptor (`idrnd i.a`, `microblink b.j`) does no arithmetic itself;
+     * it calls an obfuscated inner codec (`z0.a`) and indexes the result. It qualifies *whether or not that codec's body
+     * resolves* (across-dex codecs often don't), which is what makes this deterministic. A library helper like
+     * `androidx/work/x.i` (`"WM-" + tag`) does NO arithmetic and calls only framework methods (`StringBuilder.append`),
+     * so it does NOT qualify and folds - fixing the WorkManager false positive without an arithmetic gate that was flaky
+     * across dexes, and without a package denylist.
+     */
+    private fun looksLikeDecoder(m: DexMethod): Boolean {
+        if (Sinks.doesDecodingArithmetic(m)) return true
+        for (insn in m.insns) {
+            if (!insn.opcode.name.startsWith("INVOKE_")) continue
+            val callee = insn.ref as? MethodRef ?: continue
+            if (callee.declClass == m.declClass && callee.shortId == m.ref.shortId) continue   // self-recursion
+            if (isFrameworkOwner(callee.declClass)) continue                                    // framework (StringBuilder, String, ...) - not a codec
+            if (syntheticName(callee)) return true                                              // calls an obfuscated app helper = its codec
+        }
+        return false
+    }
+
+    /** java.*, javax.*, android.*, androidx.*, kotlin.* and other platform roots: a call here is not an app codec. */
+    private fun isFrameworkOwner(declClass: String): Boolean {
+        val c = declClass.trimStart('L').replace('/', '.')
+        return c.startsWith("java.") || c.startsWith("javax.") || c.startsWith("android.") || c.startsWith("androidx.") ||
+            c.startsWith("kotlin.") || c.startsWith("kotlinx.") || c.startsWith("dalvik.") || c.startsWith("sun.") ||
+            c.startsWith("org.json.") || c.startsWith("com.google.") || c.startsWith("org.bouncycastle.")
+    }
+
+    private fun syntheticName(ref: MethodRef): Boolean = !libraryLikeName(ref.name)
+
+    private fun libraryLikeName(name: String): Boolean {
+        if (name.startsWith("$$") || name.length <= 3) return false
+        if (name.any { it.isUpperCase() } && name.zipWithNext().any { (a, b) -> a.isLowerCase() && b.isUpperCase() }) return true
+        return name.length >= 5 && name.all { it in 'a'..'z' }
+    }
+
+    /** Trivial = nothing a reverser would call a secret: <2 printable non-control chars. Keeps real short strings
+     *  ("ftyp", "SHA-256", "BM"); drops single chars ("t") and all-control/null/whitespace values. */
+    private fun isTrivialValue(v: String): Boolean =
+        v.count { !it.isISOControl() && !it.isWhitespace() } < 2
 
     companion object {
         private val SCALARS = setOf("I", "J", "S", "B", "C", "Z", "Ljava/lang/String;")

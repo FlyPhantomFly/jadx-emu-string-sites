@@ -4,10 +4,10 @@ plugins {
     kotlin("jvm") version "2.3.10"
 }
 
-version = System.getenv("VERSION") ?: "0.2.0"
+version = System.getenv("VERSION") ?: "0.3.0"
 
-// jadx-emu this is built against: upstream commit ba65619+ (the rewritten Hooks API). It uses Dataflow, Vm.invoke and DiagnosticSink only -
-// not Hooks.after - so either the upstream build (0.1.0-beta.6) or the -fp1 build works; set EMU_VERSION to match what is in ~/.m2.
+// Built against io.github.flyphantomfly:jadx-emu. It only uses Dataflow, Vm.invoke and DiagnosticSink.
+// Set EMU_VERSION if the engine in ~/.m2 has a different version.
 val emuVersion = System.getenv("EMU_VERSION") ?: "0.2.0"
 
 repositories {

@@ -8,6 +8,7 @@ class AnalysisReport(val results: List<SiteResult>, val helpers: List<HelperInfo
     val decoded: List<SiteResult> get() = results.filter { it.outcome is Decoded }
     val decrypted: List<SiteResult> get() = results.filter { it.outcome is Decoded && (it.outcome as Decoded).confidence == Confidence.DECRYPTED }
     val folded: List<SiteResult> get() = results.filter { it.outcome is Decoded && (it.outcome as Decoded).confidence == Confidence.FOLDED }
+    val trivial: List<SiteResult> get() = results.filter { it.outcome is Decoded && (it.outcome as Decoded).confidence == Confidence.TRIVIAL }
     val skipped: List<SiteResult> get() = results.filter { it.outcome is Skipped }
 
     class Summary(
@@ -35,21 +36,26 @@ class AnalysisReport(val results: List<SiteResult>, val helpers: List<HelperInfo
     /** A short human summary, then every skipped site with its reason (the list to read when deciding what to build next). */
     fun toText(maxSkipped: Int = 200): String = buildString {
         val s = summary()
-        val nDecrypted = decrypted.size; val nFolded = decoded.size - nDecrypted
-        appendLine("sites: ${s.found} found, ${s.decoded} decoded (${nDecrypted} decrypted, ${nFolded} folded constants), ${s.skipped} skipped   (${methodsScanned} methods scanned)")
-        if (nFolded > 0) appendLine("  note: 'folded' = an ordinary constant computed by a named helper (concat/prefix/lookup), not a decrypted secret.")
-        if (s.decodedByTier.isNotEmpty()) appendLine("decoded by tier: " + s.decodedByTier.entries.joinToString { "tier ${it.key}: ${it.value}" })
-        for ((k, v) in s.byKind) appendLine("  ${k.name.padEnd(18)} decoded ${v.first}, skipped ${v.second}")
-        val dec = helpers.filter { it.decryptor }
-        if (dec.isNotEmpty()) {
-            appendLine("decryptor helpers (found by usage):")
-            for (h in dec) appendLine("  ${h.signature}  ${h.constantSites}/${h.sites} call sites with constant arguments")
+        appendLine("sites: ${s.found} found | ${decrypted.size} decrypted, ${trivial.size} trivial, ${folded.size} folded, ${s.skipped} skipped   (${methodsScanned} methods scanned)")
+        appendLine("  decrypted = recovered from an obfuscated arithmetic decryptor, value looks real.  trivial = same, but a 1-char/control token (values in JSON only).  folded = an ordinary library/named-helper constant.")
+        if (s.decodedByTier.isNotEmpty()) appendLine("  by tier: " + s.decodedByTier.entries.joinToString { "tier ${it.key}: ${it.value}" })
+        // real decryptors = helpers that actually produced a decrypted or trivial value (synthetic name + arithmetic + ran)
+        val realHelpers = (decrypted + trivial).mapNotNull { (it.outcome as Decoded).via?.substringBefore(" @") }.toSet()
+        val realDec = helpers.filter { it.signature in realHelpers }
+        if (realDec.isNotEmpty()) {
+            appendLine("decryptor helpers (obfuscated name + transform arithmetic):")
+            for (h in realDec.sortedByDescending { it.constantSites }) appendLine("  ${shortSig(h.signature)}  ${h.constantSites}/${h.sites} constant call sites")
         }
         if (decrypted.isNotEmpty()) {
-            appendLine("decrypted strings:")
-            for (r in decrypted.take(maxSkipped)) {
-                val d = r.outcome as Decoded
-                appendLine("  ${r.site.method} @${r.site.offset}  ${q(d.value)}" + (d.via?.let { "  via $it" } ?: ""))
+            appendLine("decrypted strings (grouped by decryptor):")
+            val byHelper = decrypted.groupBy { (it.outcome as Decoded).via?.substringBefore(" @")?.substringBefore(" ")?.let { v -> v.substringBefore("->").let { c -> c } }?.let { _ -> (it.outcome as Decoded).via!!.substringBefore(" @") } ?: "?" }
+            for ((helper, sites) in byHelper.entries.sortedByDescending { it.value.size }) {
+                appendLine("  via ${shortSig(helper)}  (${sites.size})")
+                for (r in sites.take(maxSkipped)) {
+                    val d = r.outcome as Decoded
+                    appendLine("      ${shortMethod(r.site.method)} @${r.site.offset}  ${q(d.value)}")
+                }
+                if (sites.size > maxSkipped) appendLine("      ... and ${sites.size - maxSkipped} more")
             }
         }
         if (s.skipReasons.isNotEmpty()) {
@@ -67,7 +73,7 @@ class AnalysisReport(val results: List<SiteResult>, val helpers: List<HelperInfo
     fun toJson(): String = buildString {
         val s = summary()
         append("{\n")
-        append("  \"summary\": {\"methodsScanned\": $methodsScanned, \"found\": ${s.found}, \"decoded\": ${s.decoded}, \"decrypted\": ${decrypted.size}, \"folded\": ${decoded.size - decrypted.size}, \"skipped\": ${s.skipped},\n")
+        append("  \"summary\": {\"methodsScanned\": $methodsScanned, \"found\": ${s.found}, \"decoded\": ${s.decoded}, \"decrypted\": ${decrypted.size}, \"trivial\": ${trivial.size}, \"folded\": ${folded.size}, \"skipped\": ${s.skipped},\n")
         append("    \"decodedByTier\": {" + s.decodedByTier.entries.joinToString(", ") { "\"tier${it.key}\": ${it.value}" } + "},\n")
         append("    \"skipReasons\": {" + s.skipReasons.entries.joinToString(", ") { "\"${it.key}\": ${it.value}" } + "}},\n")
         append("  \"helpers\": [" + helpers.joinToString(",\n    ", prefix = if (helpers.isEmpty()) "" else "\n    ") {
@@ -83,6 +89,14 @@ class AnalysisReport(val results: List<SiteResult>, val helpers: List<HelperInfo
         } + (if (results.isEmpty()) "" else "\n  ") + "]\n")
         append("}\n")
     }
+
+    /** `Lcom/foo/Bar;->baz(...)ret` -> `com.foo.Bar.baz` for readable reports. */
+    private fun shortMethod(desc: String): String {
+        val cls = desc.substringBefore(";->").trimStart('L').replace('/', '.')
+        val m = desc.substringAfter(";->").substringBefore('(')
+        return "$cls.$m"
+    }
+    private fun shortSig(sig: String): String = shortMethod(sig)
 
     companion object {
         /** JSON string literal. Control characters and unpaired surrogates are escaped so the output is always valid. */

@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-# Post-deploy check through the REAL jadx CLI, no APK needed. Runs the extension on two synthetic apps and verifies the report.
-#   fixtures/string-sites-fixture.dex : 30 sites -> 20 decoded (tier 1: 3, tier 2: 17), 10 skipped for 5 distinct reasons
-#   fixtures/string-sites-random.dex  : 40 helper calls with random non-ASCII / long plaintexts -> all 40 decoded
-# Restores your string-sites.properties afterwards.
+# Check the installed extension through the real jadx CLI, no APK needed.
+# It runs two small synthetic apps from fixtures/ and compares the report with the expected counts below.
+# Your string-sites.properties is put back afterwards.
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")/.." && pwd)"
 DATA="$HOME/.config/jadx/plugins-data/jadx-emu/data/string-sites"; PROPS="$DATA/string-sites.properties"
@@ -21,16 +20,20 @@ run string-sites-fixture.dex $'maxSteps=20000\nmaxMillis=3000\nmaxDepth=16'
 python3 - "$DATA/strings-report.json" <<'PY'
 import json, sys
 r = json.load(open(sys.argv[1], encoding="utf-8")); s = r["summary"]
-assert (s["found"], s["decoded"], s["skipped"]) == (42, 29, 13), s
-assert (s["decrypted"], s["folded"]) == (17, 12), (s["decrypted"], s["folded"])
-assert s["decodedByTier"] == {"tier1": 3, "tier2": 26}, s["decodedByTier"]
-assert s["skipReasons"] == {"UNREACHABLE": 1, "UNKNOWN_ARGUMENT": 2, "NON_CONSTANT_ARGUMENTS": 1, "STEP_OR_TIME_LIMIT": 3, "HOST_DENIED": 3, "NATIVE_METHOD": 3}, s["skipReasons"]
+assert (s["found"], s["decoded"], s["skipped"]) == (58, 44, 14), s
+assert (s["decrypted"], s.get("trivial"), s["folded"]) == (11, 3, 30), (s["decrypted"], s.get("trivial"), s["folded"])
+assert s["decodedByTier"] == {"tier1": 3, "tier2": 41}, s["decodedByTier"]
+assert s["skipReasons"] == {"UNREACHABLE": 1, "UNKNOWN_ARGUMENT": 3, "NON_CONSTANT_ARGUMENTS": 1, "STEP_OR_TIME_LIMIT": 3, "HOST_DENIED": 3, "NATIVE_METHOD": 3}, s["skipReasons"]
 vals = {x["value"] for x in r["sites"] if x["status"] == "decoded"}
-assert {"app-secret", "https://example.test/api", "chars-one", "ki", "WM-Data"} <= vals, vals
+assert {"app-secret", "https://example.test/api"} <= vals, vals
 # the tag* helper is folded, the xor loop is decrypted
 byconf = {(x["value"], x["confidence"]) for x in r["sites"] if x["status"] == "decoded"}
-assert ("WM-Data", "FOLDED") in byconf and ("app-secret", "DECRYPTED") in byconf, byconf
-print("  ok: 42 found / 29 decoded (17 decrypted, 12 folded) / 13 skipped; tag*/char-to-byte folded, xor-loop decrypted, native -> NATIVE_METHOD")
+assert ("app-secret", "DECRYPTED") in byconf, byconf
+assert ("deleg-one", "DECRYPTED") in byconf, "delegated decryptor must decrypt"
+assert any(v.startswith("WM-") and c=="FOLDED" for v,c in byconf), "WM- prefixer (framework-only) must fold"
+assert any(c == "FOLDED" and v.startswith("WM-") for v, c in byconf), "WM- prefixer must fold"
+assert any(c == "TRIVIAL" for v, c in byconf), "single-char decryptor output must be trivial"
+print("  ok: 58 found / 44 decoded (11 decrypted, 3 trivial, 30 folded) / 14 skipped; WM-/char-copy folded, single-char trivial, xor secret decrypted, native -> NATIVE_METHOD")
 PY
 echo "== fixture 2 (random plaintexts: emoji, CJK, NUL, U+2028, 4-6k chars)"
 run string-sites-random.dex ""

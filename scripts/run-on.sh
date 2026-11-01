@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Analyse a real app and print the report. Skips the decompile (--no-src --no-res), so it is fast.
-#   usage: scripts/run-on.sh <app.apk|classes.dex> [class-prefix e.g. Lcom/example/]
+# Analyse an app and print the start of the report. Skips decompiling, so it's quick.
+# Usage: scripts/run-on.sh <app.apk|classes.dex> [class-prefix, e.g. Lcom/example/]
 set -euo pipefail
 IN="${1:?usage: run-on.sh <apk|dex> [class-prefix]}"; PFX="${2:-}"
 DATA="$HOME/.config/jadx/plugins-data/jadx-emu/data/string-sites"; PROPS="$DATA/string-sites.properties"
